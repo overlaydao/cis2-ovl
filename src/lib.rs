@@ -1531,5 +1531,7 @@ mod tests {
             Err(ContractError::Custom(CustomContractError::ContractPaused)),
             "Update operator should fail because contract is paused"
         );
+
+        // TODO: test for mint and burn.
     }
 }
