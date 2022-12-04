@@ -11,7 +11,6 @@ const SUPPORTS_STANDARDS: [StandardIdentifier<'static>; 2] =
 
 type ContractTokenId = TokenIdUnit;
 
-/// TODO: TokenAmountU256に変えてもいいかも
 type ContractTokenAmount = TokenAmountU64;
 
 #[derive(Serial, DeserialWithState, Deletable, StateClone)]
@@ -39,8 +38,8 @@ struct MintParams {
 
 #[derive(Serialize, SchemaType)]
 struct BurnParams {
-    amount:   ContractTokenAmount,
     from:    Address,
+    amount:   ContractTokenAmount,
 }
 
 #[derive(Debug, Serialize, SchemaType)]
@@ -412,15 +411,16 @@ fn contract_mint<S: HasStateApi>(
     host: &mut impl HasHost<State<S>, StateApiType = S>,
     logger: &mut impl HasLogger,
 ) -> ContractResult<()> {
+    ensure!(!host.state().paused, ContractError::Custom(CustomContractError::ContractPaused));
+
     let params: MintParams = ctx.parameter_cursor().get()?;
     let sender = ctx.sender();
-    ensure!(sender.matches_account(&ctx.owner()), ContractError::Unauthorized);
+    ensure_eq!(ctx.sender(), host.state().admin, ContractError::Unauthorized);
 
     let receive_address = params.to.address();
 
     let (state, state_builder) = host.state_and_builder();
 
-    // TODO: receive_addressはownerアドレスでもいいか
     state.mint(&TOKEN_ID_OVL, params.amount, &receive_address, state_builder)?;
 
     logger.log(&Cis2Event::Mint(MintEvent {
@@ -454,6 +454,8 @@ fn contract_burn<S: HasStateApi>(
     host: &mut impl HasHost<State<S>, StateApiType = S>,
     logger: &mut impl HasLogger,
 ) -> ContractResult<()> {
+    ensure!(!host.state().paused, ContractError::Custom(CustomContractError::ContractPaused));
+
     let params: BurnParams = ctx.parameter_cursor().get()?;
     let sender = ctx.sender();
     let state = host.state_mut();
@@ -999,6 +1001,155 @@ mod tests {
         claim_eq!(err, Err(ContractError::Unauthorized), "Error is expected to be Unauthorized")
     }
 
+    #[concordium_test]
+    fn test_mint() {
+        // Set up the context
+        let mut ctx = TestReceiveContext::empty();
+        ctx.set_sender(ADMIN_ADDRESS);
+
+        // Set up the parameter.
+        let params = MintParams {
+            to:       Receiver::from_account(ACCOUNT_1),
+            amount:   ContractTokenAmount::from(100),
+        };
+        let parameter_bytes = to_bytes(&params);
+        ctx.set_parameter(&parameter_bytes);
+
+        let mut logger = TestLogger::init();
+        let mut state_builder = TestStateBuilder::new();
+        let state = initial_state(&mut state_builder);
+        let mut host = TestHost::new(state, state_builder);
+
+        // Call the contract function.
+        let result: ContractResult<()> = contract_mint(&ctx, &mut host, &mut logger);
+        // Check the result.
+        claim!(result.is_ok(), "Results in rejection");
+
+        // Check the state.
+        let balance1 = host
+            .state()
+            .balance(&TOKEN_ID_OVL, &ADDRESS_1)
+            .expect_report("Token is expected to exist");
+
+        claim_eq!(
+            balance1,
+            100.into(),
+            "Token owner balance should be decreased by the transferred amount"
+        );
+    }
+
+    #[concordium_test]
+    fn test_mint_not_authorized() {
+        // Set up the context
+        let mut ctx = TestReceiveContext::empty();
+        ctx.set_sender(ADDRESS_0);
+
+        // Set up the parameter.
+        let params = MintParams {
+            to:       Receiver::from_account(ACCOUNT_1),
+            amount:   ContractTokenAmount::from(100),
+        };
+        let parameter_bytes = to_bytes(&params);
+        ctx.set_parameter(&parameter_bytes);
+
+        let mut logger = TestLogger::init();
+        let mut state_builder = TestStateBuilder::new();
+        let state = initial_state(&mut state_builder);
+        let mut host = TestHost::new(state, state_builder);
+
+        // Call the contract function.
+        let result: ContractResult<()> = contract_mint(&ctx, &mut host, &mut logger);
+        // Check the result.
+        claim_eq!(result, Err(ContractError::Unauthorized), "Error is expected to be Unauthorized")
+    }
+
+    #[concordium_test]
+    fn test_burn() {
+        // Set up the context
+        let mut ctx = TestReceiveContext::empty();
+        ctx.set_sender(ADDRESS_0);
+
+        // Set up the parameter.
+        let params = BurnParams {
+            from:     ADDRESS_0,
+            amount:   ContractTokenAmount::from(100),
+        };
+        let parameter_bytes = to_bytes(&params);
+        ctx.set_parameter(&parameter_bytes);
+
+        let mut logger = TestLogger::init();
+        let mut state_builder = TestStateBuilder::new();
+        let state = initial_state(&mut state_builder);
+        let mut host = TestHost::new(state, state_builder);
+
+        // Call the contract function.
+        let result: ContractResult<()> = contract_burn(&ctx, &mut host, &mut logger);
+        // Check the result.
+        claim!(result.is_ok(), "Results in rejection");
+
+        // Check the state.
+        let balance0 = host
+            .state()
+            .balance(&TOKEN_ID_OVL, &ADDRESS_0)
+            .expect_report("Token is expected to exist");
+
+        claim_eq!(
+            balance0,
+            300.into(),
+            "Token owner balance should be decreased by the transferred amount"
+        );
+    }
+
+    #[concordium_test]
+    fn test_burn_not_authorized() {
+        // Set up the context
+        let mut ctx = TestReceiveContext::empty();
+        ctx.set_sender(ADDRESS_1);
+
+        // Set up the parameter.
+        let params = BurnParams {
+            from:     ADDRESS_0,
+            amount:   ContractTokenAmount::from(100),
+        };
+        let parameter_bytes = to_bytes(&params);
+        ctx.set_parameter(&parameter_bytes);
+
+        let mut logger = TestLogger::init();
+        let mut state_builder = TestStateBuilder::new();
+        let state = initial_state(&mut state_builder);
+        let mut host = TestHost::new(state, state_builder);
+
+        // Call the contract function.
+        let result: ContractResult<()> = contract_burn(&ctx, &mut host, &mut logger);
+        // Check the result.
+        claim_eq!(result, Err(ContractError::Unauthorized), "Error is expected to be Unauthorized")
+    }
+
+    #[concordium_test]
+    fn test_burn_insufficient_funds() {
+        // Set up the context
+        let mut ctx = TestReceiveContext::empty();
+        ctx.set_sender(ADDRESS_0);
+
+        // Set up the parameter.
+        let params = BurnParams {
+            from:     ADDRESS_0,
+            amount:   ContractTokenAmount::from(500),
+        };
+        let parameter_bytes = to_bytes(&params);
+        ctx.set_parameter(&parameter_bytes);
+
+        let mut logger = TestLogger::init();
+        let mut state_builder = TestStateBuilder::new();
+        let state = initial_state(&mut state_builder);
+        let mut host = TestHost::new(state, state_builder);
+
+        // Call the contract function.
+        let result: ContractResult<()> = contract_burn(&ctx, &mut host, &mut logger);
+        // Check the result.
+        claim_eq!(result, Err(ContractError::InsufficientFunds), "Error is expected to be InsufficientFunds")
+    }
+
     /// Test transfer succeeds, when `from` is the sender.
     #[concordium_test]
     fn test_transfer_account() {
@@ -1532,6 +1683,24 @@ mod tests {
             "Update operator should fail because contract is paused"
         );
 
-        // TODO: test for mint and burn.
+        // Call the `mint` function.
+        let result: ContractResult<()> = contract_mint(&ctx, &mut host, &mut logger);
+
+        // Check that invoke failed.
+        claim_eq!(
+            result,
+            Err(ContractError::Custom(CustomContractError::ContractPaused)),
+            "Mint should fail because contract is paused"
+        );
+
+        // Call the `mint` function.
+        let result: ContractResult<()> = contract_burn(&ctx, &mut host, &mut logger);
+
+        // Check that invoke failed.
+        claim_eq!(
+            result,
+            Err(ContractError::Custom(CustomContractError::ContractPaused)),
+            "Burn should fail because contract is paused"
+        );
     }
 }

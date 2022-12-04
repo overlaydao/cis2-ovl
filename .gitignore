@@ -7,7 +7,6 @@
 *.a
 *.pdf
 *.csv
-
 .stack-work
 target
 *.json
@@ -18,7 +17,6 @@ pkg
 *.iml
 *.state-*
 *.state
-
-Cargo.lock
-
 tmp*
+.DS_Store
+Cargo.lock
