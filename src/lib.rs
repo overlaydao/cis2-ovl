@@ -5,6 +5,7 @@ use concordium_std::{collections::BTreeMap, *};
 const TOKEN_ID_OVL: ContractTokenId = TokenIdUnit();
 
 pub const NEW_ADMIN_EVENT_TAG: u8 = 0;
+pub const APPROVE_EVENT_TAG: u8 = 0;
 
 const SUPPORTS_STANDARDS: [StandardIdentifier<'static>; 2] =
     [CIS0_STANDARD_IDENTIFIER, CIS2_STANDARD_IDENTIFIER];
@@ -18,6 +19,8 @@ type ContractTokenAmount = TokenAmountU64;
 struct AddressState<S> {
     balance:   ContractTokenAmount,
     operators: StateSet<Address, S>,
+    /// <spender, amount>
+    allowances: StateMap<Address, ContractTokenAmount, S>
 }
 
 #[derive(Serial, DeserialWithState, StateClone)]
@@ -40,6 +43,19 @@ struct MintParams {
 struct BurnParams {
     from:    Address,
     amount:   ContractTokenAmount,
+}
+
+#[derive(Serialize, SchemaType)]
+struct ApproveParams {
+    spender:   Address,
+    amount: ContractTokenAmount,
+}
+
+#[derive(Serialize, SchemaType)]
+struct TransferFromParams {
+    from:   Address,
+    to:     Receiver,
+    amount: ContractTokenAmount,
 }
 
 #[derive(Debug, Serialize, SchemaType)]
@@ -80,8 +96,17 @@ struct NewAdminEvent {
     new_admin: Address,
 }
 
+#[derive(Serial, SchemaType)]
+struct ApproveEvent {
+    token_id: ContractTokenId,
+    amount: ContractTokenAmount,
+    from: Address,
+    to: Address,
+}
+
 enum OvlEvent {
     NewAdmin(NewAdminEvent),
+    Approve(ApproveEvent),
     Cis2Event(Cis2Event<ContractTokenId, ContractTokenAmount>),
 }
 
@@ -90,6 +115,10 @@ impl Serial for OvlEvent {
         match self {
             OvlEvent::NewAdmin(event) => {
                 out.write_u8(NEW_ADMIN_EVENT_TAG)?;
+                event.serial(out)
+            }
+            OvlEvent::Approve(event) => {
+                out.write_u8(APPROVE_EVENT_TAG)?;
                 event.serial(out)
             }
             OvlEvent::Cis2Event(event) => event.serial(out),
@@ -111,6 +140,18 @@ impl schema::SchemaType for OvlEvent {
             TRANSFER_EVENT_TAG,
             (
                 "Transfer".to_string(),
+                schema::Fields::Named(vec![
+                    (String::from("token_id"), ContractTokenId::get_type()),
+                    (String::from("amount"), ContractTokenAmount::get_type()),
+                    (String::from("from"), Address::get_type()),
+                    (String::from("to"), Address::get_type()),
+                ]),
+            ),
+        );
+        event_map.insert(
+            APPROVE_EVENT_TAG,
+            (
+                "Approve".to_string(),
                 schema::Fields::Named(vec![
                     (String::from("token_id"), ContractTokenId::get_type()),
                     (String::from("amount"), ContractTokenAmount::get_type()),
@@ -280,6 +321,7 @@ impl<S: HasStateApi> State<S> {
         let mut to_state = self.token.entry(*to).or_insert_with(|| AddressState {
             balance:   0u64.into(),
             operators: state_builder.new_set(),
+            allowances: state_builder.new_map(),
         });
         to_state.balance += amount;
 
@@ -295,6 +337,7 @@ impl<S: HasStateApi> State<S> {
         let mut owner_state = self.token.entry(*owner).or_insert_with(|| AddressState {
             balance:   0u64.into(),
             operators: state_builder.new_set(),
+            allowances: state_builder.new_map(),
         });
         owner_state.operators.insert(*operator);
     }
@@ -304,6 +347,32 @@ impl<S: HasStateApi> State<S> {
             address_state.operators.remove(operator);
         });
     }
+
+    fn approve(
+        &mut self,
+        amount: ContractTokenAmount,
+        owner: &Address,
+        spender: &Address,
+        state_builder: &mut StateBuilder<S>,
+    ) {
+        let mut owner_state = self.token.entry(*owner).or_insert_with(|| AddressState {
+            balance:   0u64.into(),
+            operators: state_builder.new_set(),
+            allowances: state_builder.new_map(),
+        });
+
+        *owner_state.allowances.entry(*spender).or_insert(concordium_cis2::TokenAmountU64(0u64)) = amount;
+    }
+
+    // fn remove_allowance(
+    //     &mut self,
+    //     owner: &Address,
+    //     spender: &Address,
+    // ) {
+    //     self.token.entry(*owner).and_modify(|address_state| {
+    //         address_state.allowances.remove(&spender);
+    //     });
+    // }
 
     fn mint(
         &mut self,
@@ -316,6 +385,7 @@ impl<S: HasStateApi> State<S> {
         let mut owner_state = self.token.entry(*owner).or_insert_with(|| AddressState {
             balance:   0u64.into(),
             operators: state_builder.new_set(),
+            allowances: state_builder.new_map(),
         });
 
         owner_state.balance += amount;
@@ -470,6 +540,37 @@ fn contract_burn<S: HasStateApi>(
         token_id: TOKEN_ID_OVL,
         amount:   params.amount,
         owner:    params.from,
+    }))?;
+
+    Ok(())
+}
+
+#[receive(
+    contract = "cis2_OVL",
+    name = "approve",
+    parameter = "ApproveParams",
+    error = "ContractError",
+    enable_logger,
+    mutable
+)]
+fn contract_approve<S: HasStateApi>(
+    ctx: &impl HasReceiveContext,
+    host: &mut impl HasHost<State<S>, StateApiType = S>,
+    logger: &mut impl HasLogger,
+) -> ContractResult<()> {
+    ensure!(!host.state().paused, ContractError::Custom(CustomContractError::ContractPaused));
+
+    let params: ApproveParams = ctx.parameter_cursor().get()?;
+    let sender = ctx.sender();
+    let (state, state_builder) = host.state_and_builder();
+
+    state.approve(params.amount, &sender, &params.spender, state_builder);
+
+    logger.log(&OvlEvent::Approve(ApproveEvent {
+        token_id: TOKEN_ID_OVL,
+        amount:   params.amount,
+        from:    sender,
+        to: params.spender,
     }))?;
 
     Ok(())
