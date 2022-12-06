@@ -6,6 +6,7 @@ const TOKEN_ID_OVL: ContractTokenId = TokenIdUnit();
 
 pub const NEW_ADMIN_EVENT_TAG: u8 = 0;
 pub const APPROVE_EVENT_TAG: u8 = 0;
+pub const TRANSFER_FROM_EVENT_TAG: u8 = 0;
 
 const SUPPORTS_STANDARDS: [StandardIdentifier<'static>; 2] =
     [CIS0_STANDARD_IDENTIFIER, CIS2_STANDARD_IDENTIFIER];
@@ -104,9 +105,18 @@ struct ApproveEvent {
     to: Address,
 }
 
+#[derive(Serial, SchemaType)]
+struct TransferFromEvent {
+    token_id: ContractTokenId,
+    amount: ContractTokenAmount,
+    from: Address,
+    to: Address,
+}
+
 enum OvlEvent {
     NewAdmin(NewAdminEvent),
     Approve(ApproveEvent),
+    TransferFrom(TransferFromEvent),
     Cis2Event(Cis2Event<ContractTokenId, ContractTokenAmount>),
 }
 
@@ -119,6 +129,10 @@ impl Serial for OvlEvent {
             }
             OvlEvent::Approve(event) => {
                 out.write_u8(APPROVE_EVENT_TAG)?;
+                event.serial(out)
+            }
+            OvlEvent::TransferFrom(event) => {
+                out.write_u8(TRANSFER_FROM_EVENT_TAG)?;
                 event.serial(out)
             }
             OvlEvent::Cis2Event(event) => event.serial(out),
@@ -152,6 +166,18 @@ impl schema::SchemaType for OvlEvent {
             APPROVE_EVENT_TAG,
             (
                 "Approve".to_string(),
+                schema::Fields::Named(vec![
+                    (String::from("token_id"), ContractTokenId::get_type()),
+                    (String::from("amount"), ContractTokenAmount::get_type()),
+                    (String::from("from"), Address::get_type()),
+                    (String::from("to"), Address::get_type()),
+                ]),
+            ),
+        );
+        event_map.insert(
+            TRANSFER_FROM_EVENT_TAG,
+            (
+                "TransferFrom".to_string(),
                 schema::Fields::Named(vec![
                     (String::from("token_id"), ContractTokenId::get_type()),
                     (String::from("amount"), ContractTokenAmount::get_type()),
@@ -361,7 +387,23 @@ impl<S: HasStateApi> State<S> {
             allowances: state_builder.new_map(),
         });
 
-        *owner_state.allowances.entry(*spender).or_insert(concordium_cis2::TokenAmountU64(0u64)) = amount;
+        *owner_state.allowances.entry(*spender).or_insert_with(|| concordium_cis2::TokenAmountU64(0u64)) = amount;
+    }
+
+    fn spend_allowance(
+        &mut self,
+        amount: ContractTokenAmount,
+        owner: &Address,
+        spender: &Address,
+    ) -> ContractResult<()> {
+        let owner_state = self.token.get_mut(owner).ok_or(ContractError::InsufficientFunds)?;
+        let mut current_allowance_amount = owner_state.allowances.get_mut(spender).ok_or(ContractError::InsufficientFunds)?;
+        ensure!(*current_allowance_amount >= amount, ContractError::InsufficientFunds);
+        ensure!(owner_state.balance >= amount, ContractError::InsufficientFunds);
+
+        *current_allowance_amount -= amount;
+
+        Ok(())
     }
 
     // fn remove_allowance(
@@ -389,6 +431,7 @@ impl<S: HasStateApi> State<S> {
         });
 
         owner_state.balance += amount;
+
         Ok(())
     }
 
@@ -573,6 +616,66 @@ fn contract_approve<S: HasStateApi>(
         to: params.spender,
     }))?;
 
+    Ok(())
+}
+
+#[receive(
+    contract = "cis2_OVL",
+    name = "transferFrom",
+    parameter = "TransferParameter",
+    error = "ContractError",
+    enable_logger,
+    mutable
+)]
+fn contract_transfer_from<S: HasStateApi>(
+    ctx: &impl HasReceiveContext,
+    host: &mut impl HasHost<State<S>, StateApiType = S>,
+    logger: &mut impl HasLogger,
+) -> ContractResult<()> {
+    ensure!(!host.state().paused, ContractError::Custom(CustomContractError::ContractPaused));
+
+    let TransferParams(transfers): TransferParameter = ctx.parameter_cursor().get()?;
+    let spender = ctx.sender();
+
+    for Transfer {
+        token_id,
+        amount,
+        from,
+        to,
+        data,
+    } in transfers
+    {
+        let (state, builder) = host.state_and_builder();
+        let to_address = to.address();
+
+        ensure!(to_address == spender, ContractError::Unauthorized);
+
+        state.spend_allowance(amount, &from, &spender)?;
+        state.transfer(&token_id, amount, &from, &to_address, builder)?;
+
+        logger.log(&OvlEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+            token_id,
+            amount,
+            from,
+            to: to_address,
+        })))?;
+
+        // If the receiver is a contract: invoke the receive hook function.
+        if let Receiver::Contract(address, function) = to {
+            let parameter = OnReceivingCis2Params {
+                token_id,
+                amount,
+                from,
+                data,
+            };
+            host.invoke_contract(
+                &address,
+                &parameter,
+                function.as_entrypoint_name(),
+                Amount::zero(),
+            )?;
+        }
+    }
     Ok(())
 }
 
