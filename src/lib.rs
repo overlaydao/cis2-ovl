@@ -91,6 +91,18 @@ struct SetPausedParams {
     paused: bool,
 }
 
+#[derive(Serialize, SchemaType)]
+struct AllowanceResponse {
+    allowance: ContractTokenAmount
+}
+
+#[derive(Serialize, SchemaType)]
+struct AllowanceParams {
+    token_id: ContractTokenId,
+    from: Address,
+    to: Address,
+}
+
 #[derive(Serial, SchemaType)]
 #[repr(transparent)]
 struct NewAdminEvent {
@@ -954,6 +966,26 @@ fn contract_view<S: HasStateApi>(
         admin:        host.state().admin,
         paused:       host.state().paused,
         metadata_url: host.state().metadata_url.clone(),
+    };
+    Ok(state)
+}
+
+#[receive(
+    contract = "cis2_OVL",
+    name = "allowance",
+    parameter = "AllowanceParams",
+    return_value = "AllowanceResponse",
+    error = "ContractError"
+)]
+fn contract_allowance<S: HasStateApi>(
+    ctx: &impl HasReceiveContext,
+    host: &impl HasHost<State<S>, StateApiType = S>,
+) -> ContractResult<AllowanceResponse> {
+    let params: AllowanceParams = ctx.parameter_cursor().get()?;
+    let address_state = host.state().token.get(&params.from).unwrap();
+    let amount = address_state.allowances.get(&params.to).unwrap();
+    let state = AllowanceResponse {
+        allowance: *amount
     };
     Ok(state)
 }
