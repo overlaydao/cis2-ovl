@@ -660,6 +660,13 @@ fn contract_transfer_from<S: HasStateApi>(
             to: to_address,
         })))?;
 
+        logger.log(&OvlEvent::TransferFrom(TransferFromEvent {
+            token_id,
+            amount,
+            from,
+            to: to_address,
+        }))?;
+
         // If the receiver is a contract: invoke the receive hook function.
         if let Receiver::Contract(address, function) = to {
             let parameter = OnReceivingCis2Params {
