@@ -15,7 +15,7 @@ type ContractTokenId = TokenIdUnit;
 
 type ContractTokenAmount = TokenAmountU64;
 
-#[derive(Serial, DeserialWithState, Deletable, StateClone)]
+#[derive(Debug, Serial, DeserialWithState, Deletable, StateClone)]
 #[concordium(state_parameter = "S")]
 struct AddressState<S> {
     balance:   ContractTokenAmount,
@@ -24,7 +24,7 @@ struct AddressState<S> {
     allowances: StateMap<Address, ContractTokenAmount, S>
 }
 
-#[derive(Serial, DeserialWithState, StateClone)]
+#[derive(Debug, Serial, DeserialWithState, StateClone)]
 #[concordium(state_parameter = "S")]
 struct State<S: HasStateApi> {
     admin:        Address,
@@ -93,14 +93,25 @@ struct SetPausedParams {
 
 #[derive(Serialize, SchemaType)]
 struct AllowanceResponse {
-    allowance: ContractTokenAmount
+    from: Address,
+    to: Address,
+    amount: ContractTokenAmount
+}
+
+#[derive(Serialize, SchemaType)]
+struct AllowancesResponse {
+    allowances: Vec<(Address, ContractTokenAmount)>
 }
 
 #[derive(Serialize, SchemaType)]
 struct AllowanceParams {
-    token_id: ContractTokenId,
     from: Address,
     to: Address,
+}
+
+#[derive(Serialize, SchemaType)]
+struct AllowancesParams {
+    from: Address,
 }
 
 #[derive(Serial, SchemaType)]
@@ -338,6 +349,29 @@ impl<S: HasStateApi> State<S> {
             .unwrap_or(false)
     }
 
+    fn allowance(&self, from: &Address, to: &Address) -> ContractTokenAmount {
+        let address_state = match self.token.get(from) {
+            Some(v) => v,
+            None => return 0u64.into()
+        };
+        match address_state.allowances.get(to) {
+            Some(v) => return *v,
+            None => 0u64.into()
+        }
+    }
+
+    fn allowances(&self, owner: &Address) -> Vec<(Address, ContractTokenAmount)> {
+        let address_state = match self.token.get(owner) {
+            Some(v) => v,
+            None => return vec![]
+        };
+        let mut allowances: Vec<(Address, ContractTokenAmount)> = Vec::new();
+        for (spender, amount) in address_state.allowances.iter() {
+            allowances.push((*spender, *amount));
+        }
+        return allowances;
+    }
+
     fn transfer(
         &mut self,
         token_id: &ContractTokenId,
@@ -399,7 +433,7 @@ impl<S: HasStateApi> State<S> {
             allowances: state_builder.new_map(),
         });
 
-        *owner_state.allowances.entry(*spender).or_insert_with(|| concordium_cis2::TokenAmountU64(0u64)) = amount;
+        *owner_state.allowances.entry(*spender).or_insert_with(|| 0u64.into()) = amount;
     }
 
     fn spend_allowance(
@@ -982,10 +1016,30 @@ fn contract_allowance<S: HasStateApi>(
     host: &impl HasHost<State<S>, StateApiType = S>,
 ) -> ContractResult<AllowanceResponse> {
     let params: AllowanceParams = ctx.parameter_cursor().get()?;
-    let address_state = host.state().token.get(&params.from).unwrap();
-    let amount = address_state.allowances.get(&params.to).unwrap();
+    let amount = host.state().allowance(&params.from, &params.to);
     let state = AllowanceResponse {
-        allowance: *amount
+        from: params.from,
+        to: params.to,
+        amount,
+    };
+    Ok(state)
+}
+
+#[receive(
+    contract = "cis2_OVL",
+    name = "allowances",
+    parameter = "AllowancesParams",
+    return_value = "AllowancesResponse",
+    error = "ContractError"
+)]
+fn contract_allowances<S: HasStateApi>(
+    ctx: &impl HasReceiveContext,
+    host: &impl HasHost<State<S>, StateApiType = S>,
+) -> ContractResult<AllowancesResponse> {
+    let params: AllowancesParams = ctx.parameter_cursor().get()?;
+    let allowances = host.state().allowances(&params.from);
+    let state = AllowancesResponse {
+        allowances
     };
     Ok(state)
 }
@@ -1391,6 +1445,166 @@ mod tests {
         let result: ContractResult<()> = contract_burn(&ctx, &mut host, &mut logger);
         // Check the result.
         claim_eq!(result, Err(ContractError::InsufficientFunds), "Error is expected to be InsufficientFunds")
+    }
+
+    #[concordium_test]
+    fn test_approve() {
+        // Set up the context
+        let mut ctx = TestReceiveContext::empty();
+        ctx.set_sender(ADDRESS_0);
+
+        // Set up the parameter.
+        let params = ApproveParams {
+            spender:  ADDRESS_1,
+            amount:   ContractTokenAmount::from(100),
+        };
+        let parameter_bytes = to_bytes(&params);
+        ctx.set_parameter(&parameter_bytes);
+
+        let mut logger = TestLogger::init();
+        let mut state_builder = TestStateBuilder::new();
+        let state = initial_state(&mut state_builder);
+        let mut host = TestHost::new(state, state_builder);
+
+        // Call the contract function.
+        let result: ContractResult<()> = contract_approve(&ctx, &mut host, &mut logger);
+        // Check the result.
+        claim!(result.is_ok(), "Results in rejection");
+
+        // Check the state.
+        let allowance = host
+            .state()
+            .allowance(&ADDRESS_0, &ADDRESS_1);
+
+        claim_eq!(
+            allowance,
+            100.into(),
+            "first approve"
+        );
+
+        // Set up the parameter.
+        let params2 = ApproveParams {
+            spender:  ADDRESS_1,
+            amount:   ContractTokenAmount::from(0),
+        };
+        let parameter_bytes2 = to_bytes(&params2);
+        ctx.set_parameter(&parameter_bytes2);
+        let result2: ContractResult<()> = contract_approve(&ctx, &mut host, &mut logger);
+        claim!(result2.is_ok(), "Result 2 in rejection");
+
+        // Check the state.
+        let allowance2 = host
+            .state()
+            .allowance(&ADDRESS_0, &ADDRESS_1);
+
+        claim_eq!(
+            allowance2,
+            0.into(),
+            "approve() can overwrite allowance."
+        );
+
+        // Set up the parameter.
+        let params3 = ApproveParams {
+            spender:  ADDRESS_0,
+            amount:   ContractTokenAmount::from(100),
+        };
+        let parameter_bytes3 = to_bytes(&params3);
+        ctx.set_parameter(&parameter_bytes3);
+        let result3: ContractResult<()> = contract_approve(&ctx, &mut host, &mut logger);
+        claim!(result3.is_ok(), "Result 3 in rejection");
+        let _allowances = host
+            .state()
+            .allowances(&ADDRESS_0);
+
+        // println!("{:?}", _allowances);
+    }
+
+    #[concordium_test]
+    fn test_transfer_from() {
+        // Set up the context
+        let mut ctx = TestReceiveContext::empty();
+        ctx.set_sender(ADDRESS_0);
+
+        // Set up the parameter.
+        let params = ApproveParams {
+            spender:  ADDRESS_1,
+            amount:   ContractTokenAmount::from(100),
+        };
+        let parameter_bytes = to_bytes(&params);
+        ctx.set_parameter(&parameter_bytes);
+
+        let mut logger = TestLogger::init();
+        let mut state_builder = TestStateBuilder::new();
+        let state = initial_state(&mut state_builder);
+        let mut host = TestHost::new(state, state_builder);
+
+        // Call the contract function.
+        let result: ContractResult<()> = contract_approve(&ctx, &mut host, &mut logger);
+        // Check the result.
+        claim!(result.is_ok(), "Results in rejection");
+
+        // Check the state.
+        let allowance = host
+            .state()
+            .allowance(&ADDRESS_0, &ADDRESS_1);
+
+        println!();
+        println!("allowance ADDRESS_0");
+        println!("{:?}", allowance);
+
+        claim_eq!(
+            allowance,
+            100.into(),
+            "first approve"
+        );
+
+        // Set up the context
+        ctx.set_sender(ADDRESS_1);
+
+        // Set up the parameter.
+        let transfer = Transfer {
+            token_id: TOKEN_ID_OVL,
+            amount:   ContractTokenAmount::from(50),
+            from:     ADDRESS_0,
+            to:       Receiver::from_account(ACCOUNT_1),
+            data:     AdditionalData::empty(),
+        };
+        let parameter2 = TransferParams::from(vec![transfer]);
+        let parameter_bytes2 = to_bytes(&parameter2);
+        ctx.set_parameter(&parameter_bytes2);
+
+        // Call the contract function.
+        let result2: ContractResult<()> = contract_transfer_from(&ctx, &mut host, &mut logger);
+        // Check the result.
+        claim!(result2.is_ok(), "Results in rejection");
+
+        // Check the state.
+        let balance0 = host
+            .state()
+            .balance(&TOKEN_ID_OVL, &ADDRESS_0)
+            .expect_report("Token is expected to exist");
+        let balance1 = host
+            .state()
+            .balance(&TOKEN_ID_OVL, &ADDRESS_1)
+            .expect_report("Token is expected to exist");
+
+        println!("{:?}", balance0);
+        println!("{:?}", balance1);
+
+        // Check the state.
+        let allowance2 = host
+            .state()
+            .allowance(&ADDRESS_0, &ADDRESS_1);
+
+        println!();
+        println!("allowance ADDRESS_0");
+        println!("{:?}", allowance2);
+
+        claim_eq!(
+            allowance2,
+            50.into(),
+            "first approve"
+        );
     }
 
     /// Test transfer succeeds, when `from` is the sender.
