@@ -20,8 +20,6 @@ type ContractTokenAmount = TokenAmountU64;
 struct AddressState<S> {
     balance:   ContractTokenAmount,
     operators: StateSet<Address, S>,
-    /// <spender, amount>
-    allowances: StateMap<Address, ContractTokenAmount, S>
 }
 
 #[derive(Debug, Serial, DeserialWithState, StateClone)]
@@ -44,12 +42,6 @@ struct MintParams {
 struct BurnParams {
     from:    Address,
     amount:   ContractTokenAmount,
-}
-
-#[derive(Serialize, SchemaType)]
-struct ApproveParams {
-    spender:   Address,
-    amount: ContractTokenAmount,
 }
 
 #[derive(Serialize, SchemaType)]
@@ -91,41 +83,10 @@ struct SetPausedParams {
     paused: bool,
 }
 
-#[derive(Serialize, SchemaType)]
-struct AllowanceResponse {
-    from: Address,
-    to: Address,
-    amount: ContractTokenAmount
-}
-
-#[derive(Serialize, SchemaType)]
-struct AllowancesResponse {
-    allowances: Vec<(Address, ContractTokenAmount)>
-}
-
-#[derive(Serialize, SchemaType)]
-struct AllowanceParams {
-    from: Address,
-    to: Address,
-}
-
-#[derive(Serialize, SchemaType)]
-struct AllowancesParams {
-    from: Address,
-}
-
 #[derive(Serial, SchemaType)]
 #[repr(transparent)]
 struct NewAdminEvent {
     new_admin: Address,
-}
-
-#[derive(Serial, SchemaType)]
-struct ApproveEvent {
-    token_id: ContractTokenId,
-    amount: ContractTokenAmount,
-    from: Address,
-    to: Address,
 }
 
 #[derive(Serial, SchemaType)]
@@ -138,8 +99,6 @@ struct TransferFromEvent {
 
 enum OvlEvent {
     NewAdmin(NewAdminEvent),
-    Approve(ApproveEvent),
-    TransferFrom(TransferFromEvent),
     Cis2Event(Cis2Event<ContractTokenId, ContractTokenAmount>),
 }
 
@@ -148,14 +107,6 @@ impl Serial for OvlEvent {
         match self {
             OvlEvent::NewAdmin(event) => {
                 out.write_u8(NEW_ADMIN_EVENT_TAG)?;
-                event.serial(out)
-            }
-            OvlEvent::Approve(event) => {
-                out.write_u8(APPROVE_EVENT_TAG)?;
-                event.serial(out)
-            }
-            OvlEvent::TransferFrom(event) => {
-                out.write_u8(TRANSFER_FROM_EVENT_TAG)?;
                 event.serial(out)
             }
             OvlEvent::Cis2Event(event) => event.serial(out),
@@ -177,18 +128,6 @@ impl schema::SchemaType for OvlEvent {
             TRANSFER_EVENT_TAG,
             (
                 "Transfer".to_string(),
-                schema::Fields::Named(vec![
-                    (String::from("token_id"), ContractTokenId::get_type()),
-                    (String::from("amount"), ContractTokenAmount::get_type()),
-                    (String::from("from"), Address::get_type()),
-                    (String::from("to"), Address::get_type()),
-                ]),
-            ),
-        );
-        event_map.insert(
-            APPROVE_EVENT_TAG,
-            (
-                "Approve".to_string(),
                 schema::Fields::Named(vec![
                     (String::from("token_id"), ContractTokenId::get_type()),
                     (String::from("amount"), ContractTokenAmount::get_type()),
@@ -349,29 +288,6 @@ impl<S: HasStateApi> State<S> {
             .unwrap_or(false)
     }
 
-    fn allowance(&self, from: &Address, to: &Address) -> ContractTokenAmount {
-        let address_state = match self.token.get(from) {
-            Some(v) => v,
-            None => return 0u64.into()
-        };
-        match address_state.allowances.get(to) {
-            Some(v) => return *v,
-            None => 0u64.into()
-        }
-    }
-
-    fn allowances(&self, owner: &Address) -> Vec<(Address, ContractTokenAmount)> {
-        let address_state = match self.token.get(owner) {
-            Some(v) => v,
-            None => return vec![]
-        };
-        let mut allowances: Vec<(Address, ContractTokenAmount)> = Vec::new();
-        for (spender, amount) in address_state.allowances.iter() {
-            allowances.push((*spender, *amount));
-        }
-        return allowances;
-    }
-
     fn transfer(
         &mut self,
         token_id: &ContractTokenId,
@@ -393,7 +309,6 @@ impl<S: HasStateApi> State<S> {
         let mut to_state = self.token.entry(*to).or_insert_with(|| AddressState {
             balance:   0u64.into(),
             operators: state_builder.new_set(),
-            allowances: state_builder.new_map(),
         });
         to_state.balance += amount;
 
@@ -409,7 +324,6 @@ impl<S: HasStateApi> State<S> {
         let mut owner_state = self.token.entry(*owner).or_insert_with(|| AddressState {
             balance:   0u64.into(),
             operators: state_builder.new_set(),
-            allowances: state_builder.new_map(),
         });
         owner_state.operators.insert(*operator);
     }
@@ -419,48 +333,6 @@ impl<S: HasStateApi> State<S> {
             address_state.operators.remove(operator);
         });
     }
-
-    fn approve(
-        &mut self,
-        amount: ContractTokenAmount,
-        owner: &Address,
-        spender: &Address,
-        state_builder: &mut StateBuilder<S>,
-    ) {
-        let mut owner_state = self.token.entry(*owner).or_insert_with(|| AddressState {
-            balance:   0u64.into(),
-            operators: state_builder.new_set(),
-            allowances: state_builder.new_map(),
-        });
-
-        *owner_state.allowances.entry(*spender).or_insert_with(|| 0u64.into()) = amount;
-    }
-
-    fn spend_allowance(
-        &mut self,
-        amount: ContractTokenAmount,
-        owner: &Address,
-        spender: &Address,
-    ) -> ContractResult<()> {
-        let owner_state = self.token.get_mut(owner).ok_or(ContractError::InsufficientFunds)?;
-        let mut current_allowance_amount = owner_state.allowances.get_mut(spender).ok_or(ContractError::InsufficientFunds)?;
-        ensure!(*current_allowance_amount >= amount, ContractError::InsufficientFunds);
-        ensure!(owner_state.balance >= amount, ContractError::InsufficientFunds);
-
-        *current_allowance_amount -= amount;
-
-        Ok(())
-    }
-
-    // fn remove_allowance(
-    //     &mut self,
-    //     owner: &Address,
-    //     spender: &Address,
-    // ) {
-    //     self.token.entry(*owner).and_modify(|address_state| {
-    //         address_state.allowances.remove(&spender);
-    //     });
-    // }
 
     fn mint(
         &mut self,
@@ -473,7 +345,6 @@ impl<S: HasStateApi> State<S> {
         let mut owner_state = self.token.entry(*owner).or_insert_with(|| AddressState {
             balance:   0u64.into(),
             operators: state_builder.new_set(),
-            allowances: state_builder.new_map(),
         });
 
         owner_state.balance += amount;
@@ -631,104 +502,6 @@ fn contract_burn<S: HasStateApi>(
         owner:    params.from,
     }))?;
 
-    Ok(())
-}
-
-#[receive(
-    contract = "cis2_OVL",
-    name = "approve",
-    parameter = "ApproveParams",
-    error = "ContractError",
-    enable_logger,
-    mutable
-)]
-fn contract_approve<S: HasStateApi>(
-    ctx: &impl HasReceiveContext,
-    host: &mut impl HasHost<State<S>, StateApiType = S>,
-    logger: &mut impl HasLogger,
-) -> ContractResult<()> {
-    ensure!(!host.state().paused, ContractError::Custom(CustomContractError::ContractPaused));
-
-    let params: ApproveParams = ctx.parameter_cursor().get()?;
-    let sender = ctx.sender();
-    let (state, state_builder) = host.state_and_builder();
-
-    state.approve(params.amount, &sender, &params.spender, state_builder);
-
-    logger.log(&OvlEvent::Approve(ApproveEvent {
-        token_id: TOKEN_ID_OVL,
-        amount:   params.amount,
-        from:    sender,
-        to: params.spender,
-    }))?;
-
-    Ok(())
-}
-
-#[receive(
-    contract = "cis2_OVL",
-    name = "transferFrom",
-    parameter = "TransferParameter",
-    error = "ContractError",
-    enable_logger,
-    mutable
-)]
-fn contract_transfer_from<S: HasStateApi>(
-    ctx: &impl HasReceiveContext,
-    host: &mut impl HasHost<State<S>, StateApiType = S>,
-    logger: &mut impl HasLogger,
-) -> ContractResult<()> {
-    ensure!(!host.state().paused, ContractError::Custom(CustomContractError::ContractPaused));
-
-    let TransferParams(transfers): TransferParameter = ctx.parameter_cursor().get()?;
-    let spender = ctx.sender();
-
-    for Transfer {
-        token_id,
-        amount,
-        from,
-        to,
-        data,
-    } in transfers
-    {
-        let (state, builder) = host.state_and_builder();
-        let to_address = to.address();
-
-        ensure!(to_address == spender, ContractError::Unauthorized);
-
-        state.spend_allowance(amount, &from, &spender)?;
-        state.transfer(&token_id, amount, &from, &to_address, builder)?;
-
-        logger.log(&OvlEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
-            token_id,
-            amount,
-            from,
-            to: to_address,
-        })))?;
-
-        logger.log(&OvlEvent::TransferFrom(TransferFromEvent {
-            token_id,
-            amount,
-            from,
-            to: to_address,
-        }))?;
-
-        // If the receiver is a contract: invoke the receive hook function.
-        if let Receiver::Contract(address, function) = to {
-            let parameter = OnReceivingCis2Params {
-                token_id,
-                amount,
-                from,
-                data,
-            };
-            host.invoke_contract(
-                &address,
-                &parameter,
-                function.as_entrypoint_name(),
-                Amount::zero(),
-            )?;
-        }
-    }
     Ok(())
 }
 
@@ -1000,46 +773,6 @@ fn contract_view<S: HasStateApi>(
         admin:        host.state().admin,
         paused:       host.state().paused,
         metadata_url: host.state().metadata_url.clone(),
-    };
-    Ok(state)
-}
-
-#[receive(
-    contract = "cis2_OVL",
-    name = "allowance",
-    parameter = "AllowanceParams",
-    return_value = "AllowanceResponse",
-    error = "ContractError"
-)]
-fn contract_allowance<S: HasStateApi>(
-    ctx: &impl HasReceiveContext,
-    host: &impl HasHost<State<S>, StateApiType = S>,
-) -> ContractResult<AllowanceResponse> {
-    let params: AllowanceParams = ctx.parameter_cursor().get()?;
-    let amount = host.state().allowance(&params.from, &params.to);
-    let state = AllowanceResponse {
-        from: params.from,
-        to: params.to,
-        amount,
-    };
-    Ok(state)
-}
-
-#[receive(
-    contract = "cis2_OVL",
-    name = "allowances",
-    parameter = "AllowancesParams",
-    return_value = "AllowancesResponse",
-    error = "ContractError"
-)]
-fn contract_allowances<S: HasStateApi>(
-    ctx: &impl HasReceiveContext,
-    host: &impl HasHost<State<S>, StateApiType = S>,
-) -> ContractResult<AllowancesResponse> {
-    let params: AllowancesParams = ctx.parameter_cursor().get()?;
-    let allowances = host.state().allowances(&params.from);
-    let state = AllowancesResponse {
-        allowances
     };
     Ok(state)
 }
@@ -1445,166 +1178,6 @@ mod tests {
         let result: ContractResult<()> = contract_burn(&ctx, &mut host, &mut logger);
         // Check the result.
         claim_eq!(result, Err(ContractError::InsufficientFunds), "Error is expected to be InsufficientFunds")
-    }
-
-    #[concordium_test]
-    fn test_approve() {
-        // Set up the context
-        let mut ctx = TestReceiveContext::empty();
-        ctx.set_sender(ADDRESS_0);
-
-        // Set up the parameter.
-        let params = ApproveParams {
-            spender:  ADDRESS_1,
-            amount:   ContractTokenAmount::from(100),
-        };
-        let parameter_bytes = to_bytes(&params);
-        ctx.set_parameter(&parameter_bytes);
-
-        let mut logger = TestLogger::init();
-        let mut state_builder = TestStateBuilder::new();
-        let state = initial_state(&mut state_builder);
-        let mut host = TestHost::new(state, state_builder);
-
-        // Call the contract function.
-        let result: ContractResult<()> = contract_approve(&ctx, &mut host, &mut logger);
-        // Check the result.
-        claim!(result.is_ok(), "Results in rejection");
-
-        // Check the state.
-        let allowance = host
-            .state()
-            .allowance(&ADDRESS_0, &ADDRESS_1);
-
-        claim_eq!(
-            allowance,
-            100.into(),
-            "first approve"
-        );
-
-        // Set up the parameter.
-        let params2 = ApproveParams {
-            spender:  ADDRESS_1,
-            amount:   ContractTokenAmount::from(0),
-        };
-        let parameter_bytes2 = to_bytes(&params2);
-        ctx.set_parameter(&parameter_bytes2);
-        let result2: ContractResult<()> = contract_approve(&ctx, &mut host, &mut logger);
-        claim!(result2.is_ok(), "Result 2 in rejection");
-
-        // Check the state.
-        let allowance2 = host
-            .state()
-            .allowance(&ADDRESS_0, &ADDRESS_1);
-
-        claim_eq!(
-            allowance2,
-            0.into(),
-            "approve() can overwrite allowance."
-        );
-
-        // Set up the parameter.
-        let params3 = ApproveParams {
-            spender:  ADDRESS_0,
-            amount:   ContractTokenAmount::from(100),
-        };
-        let parameter_bytes3 = to_bytes(&params3);
-        ctx.set_parameter(&parameter_bytes3);
-        let result3: ContractResult<()> = contract_approve(&ctx, &mut host, &mut logger);
-        claim!(result3.is_ok(), "Result 3 in rejection");
-        let _allowances = host
-            .state()
-            .allowances(&ADDRESS_0);
-
-        // println!("{:?}", _allowances);
-    }
-
-    #[concordium_test]
-    fn test_transfer_from() {
-        // Set up the context
-        let mut ctx = TestReceiveContext::empty();
-        ctx.set_sender(ADDRESS_0);
-
-        // Set up the parameter.
-        let params = ApproveParams {
-            spender:  ADDRESS_1,
-            amount:   ContractTokenAmount::from(100),
-        };
-        let parameter_bytes = to_bytes(&params);
-        ctx.set_parameter(&parameter_bytes);
-
-        let mut logger = TestLogger::init();
-        let mut state_builder = TestStateBuilder::new();
-        let state = initial_state(&mut state_builder);
-        let mut host = TestHost::new(state, state_builder);
-
-        // Call the contract function.
-        let result: ContractResult<()> = contract_approve(&ctx, &mut host, &mut logger);
-        // Check the result.
-        claim!(result.is_ok(), "Results in rejection");
-
-        // Check the state.
-        let allowance = host
-            .state()
-            .allowance(&ADDRESS_0, &ADDRESS_1);
-
-        println!();
-        println!("allowance ADDRESS_0");
-        println!("{:?}", allowance);
-
-        claim_eq!(
-            allowance,
-            100.into(),
-            "first approve"
-        );
-
-        // Set up the context
-        ctx.set_sender(ADDRESS_1);
-
-        // Set up the parameter.
-        let transfer = Transfer {
-            token_id: TOKEN_ID_OVL,
-            amount:   ContractTokenAmount::from(50),
-            from:     ADDRESS_0,
-            to:       Receiver::from_account(ACCOUNT_1),
-            data:     AdditionalData::empty(),
-        };
-        let parameter2 = TransferParams::from(vec![transfer]);
-        let parameter_bytes2 = to_bytes(&parameter2);
-        ctx.set_parameter(&parameter_bytes2);
-
-        // Call the contract function.
-        let result2: ContractResult<()> = contract_transfer_from(&ctx, &mut host, &mut logger);
-        // Check the result.
-        claim!(result2.is_ok(), "Results in rejection");
-
-        // Check the state.
-        let balance0 = host
-            .state()
-            .balance(&TOKEN_ID_OVL, &ADDRESS_0)
-            .expect_report("Token is expected to exist");
-        let balance1 = host
-            .state()
-            .balance(&TOKEN_ID_OVL, &ADDRESS_1)
-            .expect_report("Token is expected to exist");
-
-        println!("{:?}", balance0);
-        println!("{:?}", balance1);
-
-        // Check the state.
-        let allowance2 = host
-            .state()
-            .allowance(&ADDRESS_0, &ADDRESS_1);
-
-        println!();
-        println!("allowance ADDRESS_0");
-        println!("{:?}", allowance2);
-
-        claim_eq!(
-            allowance2,
-            50.into(),
-            "first approve"
-        );
     }
 
     /// Test transfer succeeds, when `from` is the sender.

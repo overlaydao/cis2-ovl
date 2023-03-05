@@ -1,0 +1,9 @@
+{
+  "name": "OVERLAY Token (Testnet)",
+  "symbol": "OVL",
+  "decimals": 6,
+  "description": "OVERLAY token (Testnet)",
+  "thumbnail": { "url": "https://testnet.overlay.global/OVL.svg" },
+  "display": { "url": "https://testnet.overlay.global/OVL.svg" },
+  "unique": false
+}

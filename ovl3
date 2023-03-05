@@ -1,0 +1,9 @@
+{
+  "name": "Overlay Token",
+  "symbol": "OVL",
+  "decimals": 0,
+  "description": "A CIS2 Overlay token (OVL)",
+  "thumbnail": { "url": "https://overlay.global/OVL.svg" },
+  "display": { "url": "https://overlay.global/OVL.svg" },
+  "unique": false
+}
