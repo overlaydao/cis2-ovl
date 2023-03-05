@@ -22,3 +22,4 @@ tmp*
 Cargo.lock
 ovl
 OVL.svg
+test.sh

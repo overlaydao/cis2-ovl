@@ -4,6 +4,8 @@ use concordium_std::{collections::BTreeMap, *};
 
 const TOKEN_ID_OVL: ContractTokenId = TokenIdUnit();
 
+const DESIMALS: u64 = 6;
+
 pub const NEW_ADMIN_EVENT_TAG: u8 = 0;
 pub const APPROVE_EVENT_TAG: u8 = 0;
 pub const TRANSFER_FROM_EVENT_TAG: u8 = 0;
@@ -841,6 +843,19 @@ fn contract_upgrade<S: HasStateApi>(
         )?;
     }
     Ok(())
+}
+
+#[receive(
+    contract = "cis2_OVL",
+    name = "decimals",
+    return_value = "u64",
+    error = "ContractError"
+)]
+fn contract_decimals<S: HasStateApi>(
+    _ctx: &impl HasReceiveContext,
+    _host: &impl HasHost<State<S>, StateApiType = S>,
+) -> ContractResult<u64> {
+    Ok(DESIMALS)
 }
 
 #[concordium_cfg_test]
