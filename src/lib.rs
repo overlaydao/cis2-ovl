@@ -5,6 +5,7 @@ use concordium_std::{collections::BTreeMap, *};
 const TOKEN_ID_OVL: ContractTokenId = TokenIdUnit();
 
 const DESIMALS: u64 = 6;
+const MAX_SUPPLY: TokenAmountU64 = TokenAmountU64(1_000_000_000_000_000);
 
 pub const NEW_ADMIN_EVENT_TAG: u8 = 0;
 pub const APPROVE_EVENT_TAG: u8 = 0;
@@ -32,6 +33,7 @@ struct State<S: HasStateApi> {
     token:        StateMap<Address, AddressState<S>, S>,
     implementors: StateMap<StandardIdentifierOwned, Vec<ContractAddress>, S>,
     metadata_url: StateBox<concordium_cis2::MetadataUrl, S>,
+    total_supply: TokenAmountU64,
 }
 
 #[derive(Serialize, SchemaType)]
@@ -221,6 +223,8 @@ enum CustomContractError {
     /// Upgrade failed because the smart contract version of the module is not
     /// supported.
     FailedUpgradeUnsupportedModuleVersion,
+    /// Token supply must be under max supply.
+    OverMaxSupply
 }
 
 type ContractError = Cis2Error<CustomContractError>;
@@ -271,6 +275,7 @@ impl<S: HasStateApi> State<S> {
             token: state_builder.new_map(),
             implementors: state_builder.new_map(),
             metadata_url: state_builder.new_box(metadata_url),
+            total_supply: TokenAmountU64(0)
         }
     }
 
@@ -349,6 +354,8 @@ impl<S: HasStateApi> State<S> {
             operators: state_builder.new_set(),
         });
 
+        ensure!(self.total_supply + amount <= MAX_SUPPLY, Cis2Error::Custom(CustomContractError::OverMaxSupply));
+        self.total_supply += amount;
         owner_state.balance += amount;
 
         Ok(())
@@ -367,6 +374,7 @@ impl<S: HasStateApi> State<S> {
 
         let mut from_state = self.token.get_mut(owner).ok_or(ContractError::InsufficientFunds)?;
         ensure!(from_state.balance >= amount, ContractError::InsufficientFunds);
+        self.total_supply -= amount;
         from_state.balance -= amount;
 
         Ok(())
