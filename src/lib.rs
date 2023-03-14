@@ -8,8 +8,6 @@ const DESIMALS: u8 = 6;
 const MAX_SUPPLY: TokenAmountU64 = TokenAmountU64(1_000_000_000_000_000);
 
 pub const NEW_ADMIN_EVENT_TAG: u8 = 0;
-pub const APPROVE_EVENT_TAG: u8 = 0;
-pub const TRANSFER_FROM_EVENT_TAG: u8 = 0;
 
 const SUPPORTS_STANDARDS: [StandardIdentifier<'static>; 2] =
     [CIS0_STANDARD_IDENTIFIER, CIS2_STANDARD_IDENTIFIER];
