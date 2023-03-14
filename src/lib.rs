@@ -139,18 +139,6 @@ impl schema::SchemaType for OvlEvent {
             ),
         );
         event_map.insert(
-            TRANSFER_FROM_EVENT_TAG,
-            (
-                "TransferFrom".to_string(),
-                schema::Fields::Named(vec![
-                    (String::from("token_id"), ContractTokenId::get_type()),
-                    (String::from("amount"), ContractTokenAmount::get_type()),
-                    (String::from("from"), Address::get_type()),
-                    (String::from("to"), Address::get_type()),
-                ]),
-            ),
-        );
-        event_map.insert(
             MINT_EVENT_TAG,
             (
                 "Mint".to_string(),
